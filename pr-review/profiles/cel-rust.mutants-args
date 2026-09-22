@@ -1,0 +1,2 @@
+# Examples run only in CI (the "Run Examples" job), never under cargo test: their mutants are always "missed"
+--exclude=example/**

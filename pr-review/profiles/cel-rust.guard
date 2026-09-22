@@ -1,0 +1,3 @@
+^conformance/src/bin/generate\.rs$
+^\.release-plz\.toml$
+^release\.toml$

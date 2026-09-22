@@ -1,0 +1,3 @@
+# Benches and the xtask dev tooling aren't exercised by `cargo test`; their mutants always read as missed.
+--exclude=tests/benches/**
+--exclude=xtask/**

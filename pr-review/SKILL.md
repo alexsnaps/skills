@@ -63,4 +63,4 @@ conventions in `profiles/<repo>.md` win over a generic principle (e.g. cel-rust'
 ## Repo profiles
 `profiles/<repo>.md` holds what cannot be derived from the repo itself (priorities, known CI gaps,
 generated paths, conventions). Without one, use the generic workflow and say the profile checks were
-skipped. Available: `cel-rust`.
+skipped. Available: `cel-rust`, `praxis`.

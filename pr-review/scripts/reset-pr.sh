@@ -32,11 +32,9 @@ done <"$WD/restore.env"
   die "HEAD is not at the PR's merge-base any more (you moved it); not resetting. Restore point was ${RESTORE_REF:-detached}@${RESTORE_SHA:0:12}" 12
 
 # 1. anything tracked that is not part of the applied PR, or staged? refuse.
-mapfile -t TOUCHED < <(git diff --no-renames --name-only "$MERGE_BASE" "$PR_HEAD")
+TOUCHED="$(git diff --no-renames --name-only "$MERGE_BASE" "$PR_HEAD")"
 is_touched() {
-  local x
-  for x in "${TOUCHED[@]}"; do [ "$x" = "$1" ] && return 0; done
-  return 1
+  printf '%s\n' "$TOUCHED" | grep -Fxq -- "$1"
 }
 EXTRA=""
 while IFS= read -r line; do

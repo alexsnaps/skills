@@ -1,6 +1,6 @@
 ---
 name: pr-review
-description: Draft a local, terse, per-commit code review of a GitHub pull request for the maintainer to edit and post themselves, tracked per PR in .pr-reviews/ and incremental across pushes. Applies the PR diff to the local checkout for in-editor review, and never posts, commits or changes anything on GitHub. Use when the user says "review PR 123", "/pr-review", pastes a pull request URL, asks which PRs need review, or wants to reset after a review.
+description: Draft a local, terse, per-commit code review of a GitHub pull request for the maintainer to edit and post themselves, tracked per PR in .pr-reviews/ and incremental across pushes. Applies the PR diff to the local checkout first so the maintainer can review in-editor while the rest of the review runs, and never posts, commits or changes anything on GitHub. Use when the user says "review PR 123", "/pr-review", pastes a pull request URL, asks which PRs need review, or wants to reset after a review.
 ---
 
 # PR review (draft only)
@@ -25,15 +25,20 @@ description: Draft a local, terse, per-commit code review of a GitHub pull reque
 - `/pr-review reset [<ref>]`: `scripts/reset-pr.sh`, then say where the checkout now is.
 
 ## Review workflow
-1. `scripts/ensure-excluded.sh`. Read the repo's CONTRIBUTING.md, PR template and `.github/workflows/*`,
-   and `profiles/<repo>.md` if `fetch-pr.sh` reports one. The repo's own files win over the profile.
-2. `scripts/fetch-pr.sh <ref>` (finds the remote by URL; there may be no `origin`). Merged or closed:
-   update the tracking state and stop. Draft or bot PRs: only when asked (bot = light review).
-3. A tracking file exists? Read it and review incrementally (`head_moved=yes`): the range-diff since
+1. `scripts/ensure-excluded.sh`, then `scripts/fetch-pr.sh <ref>` (finds the remote by URL; there may
+   be no `origin`). Merged or closed: update the tracking state and stop (nothing to apply). Draft or
+   bot PRs: only when asked (bot = light review).
+2. **Apply the diff first, before any other review work.** `scripts/apply-pr.sh <ref>`: needs a clean
+   tree (if another PR is applied, `scripts/reset-pr.sh` first), detaches at the merge-base, applies
+   the diff unstaged, prints the way back. Then immediately tell the maintainer the diff is applied
+   and where (`branch@sha`, way back via `/pr-review reset`) so they can start reviewing in their
+   editor. Everything below is your own review work that runs afterward, in the background for them —
+   keep going without waiting for them.
+3. Read the repo's CONTRIBUTING.md, PR template and `.github/workflows/*`, and `profiles/<repo>.md`
+   if `fetch-pr.sh` reported one. The repo's own files win over the profile.
+4. A tracking file exists? Read it and review incrementally (`head_moved=yes`): the range-diff since
    `last_reviewed_sha`, full review if the old head is gone. Match old findings by quoted code, never
    by line number. Details: [TRACKING.md](TRACKING.md).
-4. `scripts/apply-pr.sh <ref>`: needs a clean tree, detaches at the merge-base, applies the diff
-   unstaged, prints the way back.
 5. CI: read what GitHub reports and what each job runs; do not re-run it. Only the gaps run locally,
    under the guard. See [REVIEW.md](REVIEW.md).
 6. Review **each commit separately**, then the whole: correctness and spec first, then design and

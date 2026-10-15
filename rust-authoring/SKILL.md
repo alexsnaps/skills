@@ -18,6 +18,18 @@ how to write correct concurrent and async code.
   builds up in small increments, so no kludge is too small to matter.
 - "Type" below means a struct, enum, or type alias defined in the current crate.
 
+### Reference files
+
+This file holds the rules and the self-check. Read a reference file when the work matches its row; each one
+explains its rules and gives examples.
+
+| File | Read it before you... |
+|---|---|
+| [DESIGN.md](DESIGN.md) | design a new type, trait, module boundary or error enum (complexity, information hiding, docs, names) |
+| [API.md](API.md) | add or change a public signature, trait, error type or crate docs (contracts, standard traits, semver) |
+| [SYSTEMS.md](SYSTEMS.md) | write `unsafe`, FFI, atomic or lock-free, or `no_std` code |
+| [PROJECT.md](PROJECT.md) | touch `Cargo.toml` (dependencies, features, versions), or write tests, benchmarks or macros |
+
 ## Write idiomatic Rust
 
 Aim for these characteristics in the code you write:
@@ -60,6 +72,17 @@ Before considering a change complete, confirm:
   flags
 - [ ] No [red flag](#red-flags) is left unaddressed
 
+### Public API (see [API.md](API.md))
+
+- [ ] Public types implement `Debug`, plus `Clone`/`Default`/`PartialEq`/`Eq`/`Hash` where they make sense; a type
+  that isn't `Send`/`Sync` says why
+- [ ] Arguments ask only for what's needed (owned only when stored or moved; generic only where callers will pass
+  other types); return types promise only what you can keep
+- [ ] New items are no more visible than needed (`pub(crate)` otherwise); no foreign type leaks into the public
+  API by accident
+- [ ] `#[non_exhaustive]` was decided for each new public enum and struct; auto-trait expectations are pinned by a
+  test
+
 ### Documentation and naming
 
 - [ ] Docs were written with (or before) the code; interface docs say what, not how
@@ -83,11 +106,15 @@ Before considering a change complete, confirm:
 
 - [ ] Every `unsafe` block has a `SAFETY` comment explaining *why* it is sound
 - [ ] Every `unsafe fn` has a `# Safety` doc section listing caller invariants
-- [ ] The unsafe boundary is as small as possible
+- [ ] The unsafe boundary is as small as possible: private fields, and a safe interface around it
 - [ ] A safe alternative was considered first
+- [ ] Soundness holds if user code panics or `?` returns early; `unsafe impl Send/Sync` carries the right bounds
+- [ ] Tests that exercise unsafe code ran under Miri (if available), or the report says they didn't
 
 ### Concurrency
 
+- [ ] The simplest design was tried first (channels or locks); anything finer-grained is backed by a measurement
+- [ ] Atomics use `SeqCst` unless a comment justifies a weaker ordering
 - [ ] Lock acquisition order is consistent
 - [ ] Channel buffer sizes are deliberate
 - [ ] `JoinHandle` results are handled
@@ -107,6 +134,8 @@ Before considering a change complete, confirm:
 - [ ] No error a caller needs is swallowed (`let _ =`, `.ok()`, `unwrap_or_default()`)
 - [ ] Error messages help with debugging
 - [ ] `#[must_use]` values are handled; `#[source]` preserves the chain
+- [ ] Error types implement `Error` (with `source`), are `Send + Sync + 'static`, and `Display` as one lowercase line
+  with no trailing punctuation
 
 ### Performance
 
@@ -123,6 +152,7 @@ Before considering a change complete, confirm:
 - [ ] Doc comments are complete; public APIs have examples
 - [ ] Tests cover boundary conditions
 - [ ] A bug fix comes with a regression test that failed before the fix
+- [ ] Nothing newer than the crate's `rust-version` is used; features stay additive
 
 ### Async
 
@@ -130,6 +160,8 @@ Before considering a change complete, confirm:
 - [ ] No `std::sync` lock held across `.await`
 - [ ] Spawned tasks are `'static`
 - [ ] `spawn` used only for genuinely parallel/background work
+- [ ] No future runs long without yielding; CPU-heavy work goes to `spawn_blocking` or a thread pool
+- [ ] Pinning uses `pin!`/`Box::pin`, never a hand-written `Pin::new_unchecked`
 
 ### Typestate
 
@@ -148,7 +180,13 @@ Before considering a change complete, confirm:
 - Put test-, bench-, and example-only crates in `[dev-dependencies]`. Gate situational code behind a feature and
   mark its dependencies `optional = true` rather than always pulling them in.
 - Pick a version that unifies with what the workspace already resolves, so `Cargo.lock` doesn't gain a second copy
-  of the same crate. If a duplicate version is unavoidable, note why.
+  of the same crate. If a duplicate version is unavoidable, note why. Within that, specify the oldest version that
+  has everything you use, not automatically the latest.
+- Depend with `default-features = false` and enable only what you use. Refer to an optional dependency as
+  `dep:name` in `[features]`, and keep features additive: enabling one must never remove an item or change a
+  signature.
+- Respect the crate's `rust-version` (MSRV): don't use language or std features newer than it.
+- Details and the rest of Cargo in [PROJECT.md](PROJECT.md).
 
 ## Design for low complexity
 
@@ -468,6 +506,18 @@ let owned = data.clone();
 tokio::spawn(async move { process(owned).await });
 ```
 
+### Take ownership in the signature, not with a clone
+
+If a function stores its argument or moves it elsewhere, take it by value (`name: String`, `item: T`). Then the
+caller decides whether to move or clone, and the cost is visible in the signature. Don't take `&str` and call
+`to_string()` inside. If the function doesn't need ownership, borrow.
+
+### Move out of `&mut` without cloning
+
+To take a value out from behind `&mut`, leave something valid in its place: `mem::take` (leaves the `Default`),
+`mem::replace` (leaves a value you give it), `mem::swap`, or `Option::take`. Use `clone_from` to reuse an
+existing allocation when overwriting a value with a copy of another.
+
 ### Arc<Mutex<T>> usage
 
 Reach for `Arc<Mutex<T>>` only when state is genuinely shared and mutated across owners. Prefer a single owner
@@ -514,20 +564,41 @@ fn normalize_name(name: &str) -> Cow<'_, str> {
 }
 ```
 
+`Cow` belongs in return types and in the fields of types used both as input and as output. It rarely belongs in an
+argument: take `&str` or `String`, and let the caller allocate if needed. A type with `Cow` fields should offer
+`into_owned(self) -> Foo<'static>`.
+
 ## Unsafe code (most critical)
 
 Avoid `unsafe` — write the safe equivalent whenever one exists. Don't mark a function `unsafe` unless callers must
 uphold real invariants the type system can't. When you do need `unsafe`, keep the boundary minimal and document it.
+Read [SYSTEMS.md](SYSTEMS.md) before writing unsafe code. In short:
+
+- Soundness depends on every piece of code that can touch the relevant fields, so keep them private, and wrap the
+  unsafe code in one module with a safe interface.
+- Stay sound when user code panics or `?` returns early: update lengths and invariants only after the data they
+  describe is valid.
+- Unsafe code may rely on the safety of safe code, never on its correctness. A user's `Hash`, `Ord` or `Deref` can
+  be wrong.
+- `unsafe impl<T: Send> Send for X<T>` carries bounds. Inside an `unsafe fn`, still use `unsafe {}` blocks.
+- Run the tests under Miri when it's available.
 
 ### Every unsafe block gets a SAFETY comment
+
+The comment must justify the operation in every build. A `debug_assert!` can back it up, but it isn't the proof,
+because it doesn't run in release builds.
 
 ```rust
 // BAD: no explanation
 unsafe { *slice.get_unchecked(index) }
 
-// GOOD: SAFETY comment explaining why this is sound
+// BAD: the justification vanishes in release builds
 debug_assert!(index < slice.len());
 // SAFETY: We verified index < slice.len() via debug_assert.
+unsafe { *slice.get_unchecked(index) }
+
+// GOOD: the precondition is established on every build (as in `checked_get` below)
+// SAFETY: `index < slice.len()`: `index` comes from `0..slice.len()` above.
 unsafe { *slice.get_unchecked(index) }
 ```
 
@@ -567,10 +638,14 @@ pub fn checked_get(slice: &[u8], index: usize) -> Option<u8> {
 
 ### FFI boundaries
 
-Wrap unsafe FFI calls in safe functions that validate inputs and translate error codes into `Result`.
+Wrap unsafe FFI calls in safe functions that validate inputs and translate error codes into `Result`. Use
+`core::ffi` types (`c_int`, `CStr`), `#[repr(C)]` structs, and one distinct type per opaque handle. Never let a
+panic unwind across `extern "C"`. Don't implement `Send`/`Sync` for a foreign type unless its library documents
+that it's thread-safe. Edition 2024 requires `unsafe extern` blocks and `#[unsafe(no_mangle)]`. Details are in
+[SYSTEMS.md](SYSTEMS.md#ffi-ch11).
 
 ```rust
-extern "C" {
+unsafe extern "C" { // `extern "C"` before edition 2024
     fn external_function(ptr: *const u8, len: usize) -> i32;
 }
 
@@ -623,6 +698,19 @@ pub enum ConfigError {
 
 pub fn parse_config(s: &str) -> Result<Config, ConfigError> { /* ... */ }
 ```
+
+### Enumerate or make opaque
+
+Choose by how callers will react to the error (details in [API.md](API.md#errors-ch4)):
+
+- Enumerate the causes that callers will handle differently.
+- When callers can only report the error, a library can expose one opaque error type instead: private fields,
+  methods for the interesting facets (a line number, a status code), and an implementation of `Error`. Don't
+  return `anyhow::Error` or `Box<dyn Error>` from a library API; neither implements `std::error::Error`.
+- Keep `Result` small by boxing large error payloads (clippy's `result_large_err`).
+- `Result<T, ()>` is not `Option<T>`: an `Err` is a failure to handle, while `None` just means there is nothing to
+  return. Use a unit struct that implements `Error` rather than `()`, and `std::convert::Infallible` for a
+  `Result` that can't fail.
 
 ### Preserve error context
 
@@ -685,6 +773,17 @@ examples are in [DESIGN.md](DESIGN.md#documentation-ch1213-1516).
   across related pairs (`src_block`/`dst_block`). The farther a name's uses are from its declaration, the longer it
   should be. Follow the Rust API Guidelines naming conventions (`as_`/`to_`/`into_`, no `get_` prefix). If a
   name is hard to pick, the item probably does two jobs.
+
+## Testing
+
+Details are in [PROJECT.md](PROJECT.md#tests-ch6).
+
+- Unit tests sit beside the code in a `#[cfg(test)] mod tests`. Integration tests and doctests exercise only the
+  public API.
+- To inspect internals from tests, add `#[cfg(test)] pub(crate)` accessors rather than widening visibility.
+- Test invariants with property tests against a simple reference implementation, and fuzz parsers.
+- Show that a misuse doesn't compile with a `compile_fail` doctest, and confirm it fails for the right reason.
+- Benchmarks use `criterion` and `std::hint::black_box`, with only the measured code inside the loop.
 
 ---
 
@@ -751,6 +850,16 @@ fn bad_static() -> String { String::from("error message") }
 fn good_static() -> &'static str { "error message" }
 ```
 
+### Small wins from std
+
+- Wrap anything that receives many small reads or writes in `BufReader`/`BufWriter`.
+- Use `Vec::swap_remove` (O(1)) when element order doesn't matter, and `VecDeque` for queues and stacks used at
+  both ends.
+- Keep values that are moved around small: box large error payloads and large enum variants (clippy warns by
+  default with `result_large_err` and `large_enum_variant`).
+- In a generic function, move the type-independent work into a non-generic inner function, so it is compiled
+  once rather than once per instantiation.
+
 ---
 
 ## Trait design
@@ -764,8 +873,14 @@ observer onto a problem it doesn't fit.
 
 - Default methods are implementation inheritance. Write them only against the documented contract of the
   required methods, so an implementor doesn't have to read them to know what to override.
-- Don't emulate inheritance with `Deref` (only smart pointers should implement it). Hold the shared part as a
-  field and expose the operations you mean.
+- Don't emulate inheritance with `Deref`; only transparent, smart-pointer-like wrappers should implement it. Hold
+  the shared part as a field and expose the operations you mean.
+- Use an associated type when a type has one natural implementation of the trait, and a type parameter only when
+  several make sense (`From<T>`).
+- Keep a trait object-safe if users may want `dyn Trait`: put generic convenience methods behind
+  `where Self: Sized`.
+- For a new trait, add blanket impls for `&T`, `&mut T` and `Box<T>` where the receivers allow it. Seal a trait
+  only when outside implementations make no sense. More in [API.md](API.md#traits-ch23-13).
 
 ```rust
 // BAD: trait soup -- not Java, no need to interface everything
@@ -782,7 +897,11 @@ impl DataProcessor {
 
 ### Trait objects vs generics
 
-- Default to **generics** (static dispatch) for performance and inlining.
+- In a library, default to **generics** (static dispatch) for performance and inlining; the caller can still pass
+  a trait object, but a `dyn` parameter forces dynamic dispatch on every caller.
+- In a binary, `dyn Trait` is often the simpler choice and compiles faster, at a usually marginal runtime cost.
+- Make an argument generic only where callers will reasonably pass several types. Making a concrete argument
+  generic later can break callers' type inference.
 - Use **trait objects** (`dyn Trait`) for heterogeneous collections or where dynamic dispatch is required.
 - Use `impl Trait` in return position when the caller doesn't need the concrete type.
 
@@ -797,7 +916,34 @@ fn store_handlers(handlers: Vec<Box<dyn Handler>>) { /* ... */ }
 fn create_handler() -> impl Handler { ConcreteHandler::new() }
 ```
 
+## Macros
+
+- Prefer functions and generics; if the code varies by type, use generics. Use `macro_rules!` for repetitive,
+  structurally similar code that generics can't express.
+- In exported macros, use `$crate::` and `::core::` paths, never the caller's imports.
+- A procedural macro needs a strong reason, because it costs compile time. Report its errors with
+  `compile_error!` spanned on the offending input. More in [PROJECT.md](PROJECT.md#macros-ch7).
+
+## Concurrency
+
+- Start with the simplest design (threads with channels, or a `Mutex`), measure, and fix only the measured
+  bottleneck, for example by splitting a lock or adding a thread, before reaching for lock-free code.
+- Choose the model by the work:
+  - shared state when updates don't commute;
+  - a worker pool (`rayon`) for the same operation over different data;
+  - an actor (a task that owns a resource and serves requests from a channel) per independent resource.
+- Keep critical sections short. When you split a lock, always take the parts in the same order.
+- Concurrency has overhead: measure the parallel version against the sequential one.
+- For atomics, memory orderings, and testing with Loom and TSan, see
+  [SYSTEMS.md](SYSTEMS.md#atomics-and-lock-free-code-ch10).
+
 ## Async code
+
+### Use async only when it pays
+
+Async adds machinery. Use it when the program waits on many I/O operations at once; a synchronous interface is
+simpler otherwise. For parallelism, futures must be `Send` and spawned as separate tasks: one big future is polled
+by one thread. Spawned tasks make progress only while the runtime runs.
 
 ### No blocking in an async context
 
@@ -859,6 +1005,20 @@ async fn good_lock_tokio(mutex: &tokio::sync::Mutex<Data>) {
 **Selection guide:**
 - `std::sync::Mutex`: low contention, short critical sections, never across `.await`
 - `tokio::sync::Mutex`: when holding across `.await` is required or under high contention
+
+### Keep futures cooperative and small
+
+- A future should never run long between `.await`s: as a rule of thumb, no more than about a millisecond without
+  returning `Pending`. Move CPU-heavy work to `spawn_blocking` or a thread pool, and yield
+  (`tokio::task::yield_now`) inside long loops.
+- Locals held across an `.await` live inside the future, so a big buffer makes every move of the future a big
+  `memcpy`. `Box::pin` a large future that gets moved around (clippy's `large_futures`, opt-in, finds them).
+- Pin with `std::pin::pin!` or `Box::pin`, and project pinned fields with `pin-project`(`-lite`). Don't write
+  `Pin::new_unchecked` yourself.
+- In a hand-written `Future::poll`, return `Pending` only after arranging a wake-up (an inner future returned
+  `Pending`, or you stored the `Waker`). Don't poll a future again after it returns `Ready` unless it is fused.
+- A library that should work on any runtime takes generic I/O traits (`AsyncRead`/`AsyncWrite`) rather than one
+  runtime's types, and never starts a runtime of its own behind the caller's back.
 
 ### Async trait methods
 

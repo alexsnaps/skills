@@ -1,6 +1,6 @@
 ---
 name: rust-authoring
-description: Author idiomatic, hard-to-misuse Rust. Use when writing or modifying Rust code — choosing types, APIs, error handling, concurrency, and async patterns so misuse is caught at compile time.
+description: Author idiomatic, hard-to-misuse Rust. Use when writing or modifying Rust code — choosing types, APIs, error handling, concurrency, and async patterns so misuse is caught at compile time, and shaping modules, interfaces, names and docs so complexity stays low.
 ---
 
 ## When this applies
@@ -11,8 +11,11 @@ how to write correct concurrent and async code.
 
 - Write code that fits its surroundings — match the crate's existing naming, module layout, error style, and
   idioms before importing a pattern from here.
-- When a rule here conflicts with a strong, consistent local convention, follow the local convention.
+- When a rule here conflicts with a strong, consistent local convention, follow the local convention. Don't
+  introduce a "better" convention in one place; if one is worth changing, ask, then change every use.
 - Prefer moving a class of bug to compile time (strong types, enums, typestate) over catching it at runtime.
+- Working code isn't enough: aim for the design that keeps the code easy to understand and change. Complexity
+  builds up in small increments, so no kludge is too small to matter.
 - "Type" below means a struct, enum, or type alias defined in the current crate.
 
 ## Write idiomatic Rust
@@ -45,6 +48,29 @@ Before considering a change complete, confirm:
 - [ ] Type signatures express intent
 - [ ] Error type granularity is appropriate
 
+### Design (see [DESIGN.md](DESIGN.md))
+
+- [ ] Each new type or module hides at least one decision; its interface is much simpler than its implementation
+- [ ] No new pass-through methods, forwarding wrappers, or parameters threaded through layers that don't use them
+- [ ] The common case needs no knowledge of rare options (defaults; extras kept off the main path)
+- [ ] Each new error variant or panic is either one a caller can act on or a genuine bug; the rest were defined
+  away, masked, or aggregated
+- [ ] For a new public interface, at least one substantially different alternative was considered
+- [ ] Modified code reads as if it had been designed with the change in mind, with no bolted-on special cases or
+  flags
+- [ ] No [red flag](#red-flags) is left unaddressed
+
+### Documentation and naming
+
+- [ ] Docs were written with (or before) the code; interface docs say what, not how
+- [ ] Arguments, return values and fields are precise: units, inclusive/exclusive bounds, meaning of `None`/empty,
+  ownership
+- [ ] `# Errors` / `# Panics` / `# Safety` sections are present where they apply
+- [ ] No comment restates the code or the item's name; workarounds say why they're needed
+- [ ] Names are precise and used consistently; booleans read as predicates
+- [ ] The diff was re-read: docs match the new behaviour; no leftover `dbg!`, `println!`, `todo!()`, or
+  commented-out code
+
 ### Ownership and borrowing
 
 - [ ] Every `clone()` is intentional and justified by a comment when non-obvious
@@ -76,8 +102,9 @@ Before considering a change complete, confirm:
 
 ### Error handling
 
-- [ ] Libraries use `thiserror`; applications use `anyhow` + `.context()`
-- [ ] No `unwrap()` / `expect()` in production code
+- [ ] No `unwrap()` / `expect()` on recoverable failures in production code; only a broken invariant (a bug)
+  panics, via `expect("<invariant>")` or `unreachable!`
+- [ ] No error a caller needs is swallowed (`let _ =`, `.ok()`, `unwrap_or_default()`)
 - [ ] Error messages help with debugging
 - [ ] `#[must_use]` values are handled; `#[source]` preserves the chain
 
@@ -88,12 +115,14 @@ Before considering a change complete, confirm:
 - [ ] Strings built with `with_capacity` / `write!` where it matters
 - [ ] `impl Trait` vs `Box<dyn Trait>` chosen deliberately
 - [ ] Hot paths avoid allocations
+- [ ] Every optimization that adds complexity is backed by a measurement
 
 ### Code quality
 
 - [ ] `cargo clippy` is clean and `cargo fmt` applied
 - [ ] Doc comments are complete; public APIs have examples
 - [ ] Tests cover boundary conditions
+- [ ] A bug fix comes with a regression test that failed before the fix
 
 ### Async
 
@@ -121,6 +150,73 @@ Before considering a change complete, confirm:
 - Pick a version that unifies with what the workspace already resolves, so `Cargo.lock` doesn't gain a second copy
   of the same crate. If a duplicate version is unavoidable, note why.
 
+## Design for low complexity
+
+Every design choice should keep the code easy to understand and change. Judge a choice by what it costs the next
+reader: how many places change if this decision changes, how much a caller must know, and whether a maintainer
+would know what else to update (if not, make the compiler tell them). [DESIGN.md](DESIGN.md) has the reasoning
+and Rust examples behind each rule below; **read it before you design a new public type, trait, module boundary,
+or error enum.**
+
+- **Make modules deep.** A function, type or module should hide much more than its interface exposes. Don't split
+  things up by size: many small items, each with its own interface, add complexity.
+- **Hide each design decision in one module** (a format, a representation, an algorithm). Don't split modules by
+  execution phase when the phases share knowledge, and don't hand out references to internal collections.
+- **Make the common case simple.** `new`/`Default` cover the usual use; rarely used options live in builder
+  methods that the common caller never needs to see.
+- **Pull complexity down.** Handle a condition inside the module rather than returning it as an error, an
+  `Option` or a config parameter, unless callers genuinely need to decide.
+- **Make it somewhat general-purpose.** Implement today's need, but phrase the interface in the module's own
+  terms rather than in terms of the caller's feature.
+- **Different layer, different abstraction.** Avoid methods that only forward to a field, wrappers that mirror an
+  inner type's API, and parameters threaded through functions that only pass them on.
+- **Define errors and special cases out of existence.** See
+  [Reduce where errors must be handled](#reduce-where-errors-must-be-handled).
+- **Design it twice.** For a new public type, trait or module interface, sketch at least two substantially
+  different sets of signatures and choose by ease of use for callers.
+
+### Red flags
+
+When you notice one of these in code you're writing, stop and look for a design that removes it. Each one is a
+prompt to reconsider, not a verdict.
+
+| Red flag | What it looks like in Rust |
+|---|---|
+| Shallow Module | a `pub` item whose doc would be as long as its body; a newtype that forwards most of the inner API |
+| Information Leakage | one format, representation or decision known in two modules; getters returning `&HashMap`/`&Vec` internals |
+| Temporal Decomposition | types or modules per execution phase (`reader`/`parser`/`writer`) that share format knowledge |
+| Overexposure | the common call needs rarely used parameters or types; a `new` whose extra arguments nearly always take the same value |
+| Pass-Through Method / Variable | methods that only forward to a field; a parameter threaded through functions that only hand it on |
+| Repetition | the same snippet, `match` or cleanup in several places |
+| Special-General Mixture | a general mechanism with code for one of its uses; a `bool` parameter that picks between two bodies |
+| Conjoined Methods | two functions you can only understand by reading both |
+| Comment Repeats Code | `/// Returns the name.` on `fn name` |
+| Implementation Documentation Contaminates Interface | `///` docs describing internals the caller doesn't need |
+| Vague Name | `data`, `info`, `status`, `manager`, `tmp`, a bare `count`, `result` for something other than the return value |
+| Hard to Pick Name | no short, precise name comes to mind: the item does more than one job |
+| Hard to Describe | a complete `///` doc has to be long |
+| Nonobvious Code | a quick read misleads: tuple returns, callbacks with no "invoked when", a `new` that spawns tasks |
+
+Clippy can catch a few of these without any change to the crate's lint config:
+
+```sh
+cargo clippy -- -W clippy::fn_params_excessive_bools -W clippy::struct_excessive_bools \
+  -W clippy::missing_errors_doc -W clippy::missing_panics_doc -W clippy::wildcard_enum_match_arm
+```
+
+## Modifying existing code
+
+- When you're done, the code should look as if it had been designed with this change in mind. Don't make the
+  smallest diff by bolting on a special case, flag or parameter. If the change needs a seam that isn't there,
+  refactor first (the `make-change-easy` skill, if installed, structures this).
+- Stay in scope: improve the design of the code the change touches, and report (don't fix) unrelated problems you
+  notice.
+- Keep comments next to the code they describe, and update them in the same change. Reasons a future maintainer
+  will need go in the code, not only in the commit message.
+- For a bug fix, write the regression test first and watch it fail.
+- Before calling it done, re-read the whole diff: do the docs still match the behaviour, and is any `dbg!`,
+  `println!`, `todo!()`, stale TODO, or commented-out code left over?
+
 ## Shaping functions and types
 
 ### Constructors
@@ -129,11 +225,27 @@ When you create a new instance of a type, expose it as an associated function on
 named constructor like `Type::from_parts(...)`) rather than a free function. Implement `Default` when the type has
 a sensible default so it composes with the rest of the ecosystem.
 
+Keep `new` cheap and free of side effects. Name a constructor that does I/O, connects, or spawns threads or tasks
+for what it does (`open`, `connect`, `spawn`) and document that it does so.
+
 ### Prefer methods over free functions
 
 When a function's primary argument is (a reference to) a struct from the current crate, make it a method in an
 `impl` block on that type rather than a free function. Behaviour stays with its data and the call site reads
 better.
+
+### Expose operations, not fields
+
+Don't hand out the representation: no getter that returns `&HashMap`/`&Vec` internals, and no getter and setter
+pair per field. If a struct has an invariant, keep its fields private and offer the domain operations callers
+need (`param(name) -> Option<&str>`, not `params() -> &HashMap<..>`). A plain-data struct with no invariant can
+have `pub` fields rather than trivial accessors.
+
+### Return named structs, not tuples
+
+When the meaning of the parts isn't obvious, return a struct with named fields: with `-> (u64, bool)`, every
+caller has to remember which is which. Universally understood pairs, such as `(K, V)` or the result of
+`split_at`, are fine as tuples.
 
 ## Design for illegal-states-unrepresentable
 
@@ -147,7 +259,20 @@ compiler check you handled every case.
 
 Don't represent distinct domain concepts with the same primitive — e.g. `String` for both an IP address and a file
 path, or `u32` for both a user id and a byte count. Wrap each in a newtype so the compiler rejects passing one
-where the other is expected.
+where the other is expected. The classic bug is one `block` name and one integer type used both for a block index
+within a file and for a block number on disk. Give the two concepts different names as well as different types
+(`FileBlock`, `DiskBlock`). A newtype should expose the domain operations, not forward the inner type's whole API.
+
+### Let the compiler find every site
+
+When adding a variant to one of your enums means other code must change too, `match` on that enum exhaustively,
+with no `_ =>` arm, so that every site that needs updating fails to compile. Where a dependency can't be checked
+by the compiler, document it where a maintainer must look: "adding a variant also requires …" on the enum itself.
+
+### Prefer empty over absent
+
+When "none" and "empty" mean the same thing, use the empty value (an empty `Vec`, string or range) rather than
+`Option<Vec<T>>` or an `is_set` flag, so that normal code handles the case without an `if`.
 
 ### Reach for typestate when correctness depends on order or mode
 
@@ -296,7 +421,28 @@ Typestate adds generic machinery and has real costs. Prefer a runtime model when
 - **Repeated functions.** When you find yourself writing the same function a second time, pull it into a shared
   helper or an associated function rather than copy-pasting.
 - **Near-identical functions.** When two functions you're writing differ only slightly, unify them with a
-  parameter that varies the behaviour instead of maintaining two bodies.
+  parameter that varies the behaviour instead of maintaining two bodies — as long as the merged signature stays
+  simple. If unifying takes a `bool` that picks between two bodies or several extra parameters, keep two
+  functions that share a private helper instead.
+- **Duplicated knowledge.** Two modules that both know a format or a representation are duplication even when
+  their code differs. Put that knowledge in one module.
+- **Repeated cleanup.** When the same cleanup precedes several early returns, use `?` with an RAII guard (`Drop`)
+  or an inner function that returns `Result`, rather than copying the cleanup.
+- **Not every repetition is worth a helper.** A one- or two-line snippet, or a helper that would need a complex
+  signature to reach its surroundings, is often better left inline.
+
+## Split and join deliberately
+
+- Don't split a function just because it's long. A long function with a simple signature that reads block by block
+  is fine.
+- Extract a subtask only when the child can be understood without the parent and the parent without the child's
+  body. If you find yourself flipping between two functions to understand either one, join them.
+- Don't extract a one-line helper used in one place (such as a `log_x_error()` wrapper); the reader has to jump to
+  it and back.
+- Separate general-purpose mechanisms from special-purpose uses: a general mechanism shouldn't contain code for one
+  of its callers. Push that code up into the caller's layer.
+- Don't bundle loosely related state behind flags (a cursor and a selection plus `has_selection: bool`). Two
+  simpler types are usually easier both to use and to implement.
 
 ## Ownership and borrowing
 
@@ -438,6 +584,23 @@ pub fn safe_wrapper(data: &[u8]) -> Result<i32, Error> {
 
 ## Error handling
 
+### Reduce where errors must be handled
+
+Every error variant and every panic is part of the interface, and error paths are the least-tested code. Before
+adding one, try these in order (examples in [DESIGN.md](DESIGN.md#define-errors-out-of-existence-ch10)):
+
+1. **Define it away.** Redefine the operation so the condition is normal: "ensure absent" succeeds when the item
+   is already absent, and a range query returns the overlap (possibly empty) instead of failing on out-of-range
+   bounds. Typestate defines wrong-state errors away.
+2. **Mask it low.** Recover inside the module when every caller would do the same (retry, fall back).
+3. **Aggregate it high.** Propagate with `?` to a single handler (the request loop, `main`) instead of handling
+   the error at each call site, and build the human-readable message where the error is created.
+4. **Crash on bugs.** A broken internal invariant is a bug: panic with a message naming the invariant rather
+   than adding a variant that no caller can act on.
+
+Add a variant only when a caller would handle it differently from the others. Don't overdo it, though: never
+swallow an error the caller needs to know about.
+
 ### Library vs application error types
 
 - **Libraries**: define structured, matchable errors with `thiserror` so callers can match on variants.
@@ -499,7 +662,42 @@ pub enum ServiceError {
 
 ---
 
+## Documentation and naming
+
+Comments record what the code can't express: the abstraction, the precise contract, and the reasons. Details and
+examples are in [DESIGN.md](DESIGN.md#documentation-ch1213-1516).
+
+- **Write the `///` doc before the body.** If it's hard to make the doc both short and complete, or a caller
+  needs implementation details to use the item, rework the design before writing the code.
+- **Interface docs say what, not how.** For a type: what one value represents, and its limitations. For a
+  function: its behaviour as the caller sees it; arguments and return value; side effects; `# Errors`,
+  `# Panics`, `# Safety`, `# Cancel Safety`; preconditions. Implementation notes go in `//` inside the body.
+- **Be precise**: units, inclusive or exclusive bounds, what `None`/empty/zero means, who owns or closes a
+  resource, invariants. Describe fields as what they represent, not as which code updates them.
+- **Don't repeat the code or the name** (`/// Returns the count.` on `fn count`). Implementation comments explain
+  what a block does and why, one per block; a workaround cites the reason or issue.
+- **Document each decision once**, where a maintainer will look. Elsewhere, link to it (``[`Type::method`]``); link
+  to external specs rather than restating them; don't re-describe a callee at its call site.
+- **Document nonobvious control flow**: say when, and on which thread or task, a callback, registered handler,
+  spawned task, or side-effecting `Drop` runs.
+- **Names are precise and consistent.** Avoid `data`, `info`, `status`, `manager`, `tmp`, and a bare `count`.
+  Booleans are predicates (`cursor_visible`). Use one name per concept across the crate, and share a base name
+  across related pairs (`src_block`/`dst_block`). The farther a name's uses are from its declaration, the longer it
+  should be. Follow the Rust API Guidelines naming conventions (`as_`/`to_`/`into_`, no `get_` prefix). If a
+  name is hard to pick, the item probably does two jobs.
+
+---
+
 ## Performance
+
+### Measure before adding complexity
+
+Simple code is usually fast. Know what is fundamentally expensive (network round trips, disk and syscall I/O,
+heap allocation, cache misses) and pick the naturally efficient option when it's just as simple: `HashMap` unless
+you need ordering, `Vec<T>` rather than `Vec<Box<T>>`. Add complexity for speed only with a measurement behind it
+(`cargo bench`/criterion, a profiler): keep the baseline, and back out a change that doesn't measurably help.
+When optimizing a hot path, check for all special cases with one test up front and move their handling into a
+separate `#[cold]` function ([example](DESIGN.md#designing-for-performance-ch20)).
 
 ### Avoid unnecessary collect()
 
@@ -560,7 +758,14 @@ fn good_static() -> &'static str { "error message" }
 ### Don't over-abstract
 
 Don't create a trait for everything — concrete types are simpler and faster. Introduce a trait only when you
-genuinely need polymorphism.
+genuinely need polymorphism. A trait gets deeper the more distinct implementations it has; one with a single impl
+is usually a shallow layer. The same goes for design patterns: don't force a builder, wrapper, visitor, or
+observer onto a problem it doesn't fit.
+
+- Default methods are implementation inheritance. Write them only against the documented contract of the
+  required methods, so an implementor doesn't have to read them to know what to override.
+- Don't emulate inheritance with `Deref` (only smart pointers should implement it). Hold the shared part as a
+  field and expose the operations you mean.
 
 ```rust
 // BAD: trait soup -- not Java, no need to interface everything
